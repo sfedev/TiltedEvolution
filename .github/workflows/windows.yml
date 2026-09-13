@@ -119,6 +119,35 @@ jobs:
           rm -f str-build/SkyrimTogetherReborn/*.pdb str-build/SkyrimTogetherReborn/*.lib str-build/SkyrimTogetherReborn/*.exp
           rm -f str-build/SkyrimTogetherReborn/*Tests.exe
 
+      - name: Include playtest installer and package manifest
+        if: ${{ inputs.upload-build-for-next-job && github.repository_owner == 'sfedev' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & ./Tools/Playtest/Test-Install-STR.ps1
+          Copy-Item Tools/Playtest/Install-STR.ps1,Tools/Playtest/Jugar-STR.cmd,Tools/Playtest/Restaurar-Skyrim.cmd,Tools/Playtest/LEEME-STR.txt str-build/
+          $source = Get-Content Code/client/main.cpp -Raw
+          $declaration = [regex]::Match($source, 'kSupportedGameVersions\s*\[[^\]]*\]\s*=\s*\{([^}]+)\}')
+          $versions = @([regex]::Matches($declaration.Groups[1].Value, '"(\d+\.\d+\.\d+\.\d+)"') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+          if (-not $versions.Count) { throw 'No supported game versions found in client/main.cpp' }
+          @{
+            Repository = $env:GITHUB_REPOSITORY
+            Commit = $env:GITHUB_SHA
+            Ref = $env:GITHUB_REF_NAME
+            Run = "https://github.com/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+            SupportedGameVersions = $versions
+          } | ConvertTo-Json | Set-Content str-build/build-info.json -Encoding utf8
+          $root = (Resolve-Path str-build).Path
+          $files = foreach ($name in @('SkyrimTogetherReborn', 'meshes', 'scripts', 'SkyrimTogetherRebornBehaviors', 'SkyrimTogether.esp', 'SkyrimTogetherQuestPatches.esp')) {
+            Get-ChildItem (Join-Path $root $name) -File -Recurse | ForEach-Object {
+              $relative = $_.FullName.Substring($root.Length + 1)
+              if ($relative -notmatch '^SkyrimTogetherReborn\\(config|logs|cache)\\') {
+                @{ Path = $relative; SHA256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash }
+              }
+            }
+          }
+          @($files) | ConvertTo-Json | Set-Content str-build/package-files.json -Encoding utf8
+
       - name: Create Windows release zips
         if: ${{ inputs.upload-build-for-next-job }}
         run: |
