@@ -1,3 +1,4 @@
+#include <cstring>
 #include "SubtitleManager.h"
 #include "MenuTopicManager.h"
 
@@ -5,6 +6,7 @@
 
 #include <TESObjectREFR.h>
 #include <Games/ActorExtension.h>
+#include <Forms/TESQuest.h>
 
 #include <Forms/TESTopicInfo.h>
 #include <Misc/BSFixedString.h>
@@ -32,11 +34,9 @@ void* SubtitleManager::HideSubtitle(TESObjectREFR* apSpeaker) noexcept
 
 void TP_MAKE_THISCALL(HookShowSubtitle, SubtitleManager, TESObjectREFR* apSpeaker, const char* apSubtitleText, bool aIsInDialogue)
 {
-    // spdlog::debug("Subtitle for actor {:X} (bool {}):\n\t{}", apSpeaker ? apSpeaker->formID : 0, aIsInDialogue, apSubtitleText);
-
     Actor* pActor = Cast<Actor>(apSpeaker);
     const bool isNpc = pActor && !pActor->GetExtension()->IsPlayer();
-    const bool shouldSyncSubtitle = apSubtitleText && isNpc && (pActor->GetExtension()->IsLocal() || MenuTopicManager::IsPlayerDialogueSpeaker(pActor));
+    const bool shouldSyncSubtitle = apSubtitleText && std::strlen(apSubtitleText) && isNpc && (pActor->GetExtension()->IsLocal() || MenuTopicManager::IsPlayerDialogueSpeaker(pActor));
     if (shouldSyncSubtitle)
         World::Get().GetRunner().Trigger(SubtitleEvent(apSpeaker->formID, apSubtitleText));
 
