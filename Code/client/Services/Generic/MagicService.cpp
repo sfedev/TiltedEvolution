@@ -27,6 +27,7 @@
 #include <Games/Overrides.h>
 
 #include <Forms/SpellItem.h>
+#include <Forms/EnchantmentItem.h>
 #include <PlayerCharacter.h>
 
 #include <Games/TES.h>
@@ -57,6 +58,26 @@ void MagicService::OnUpdate(const UpdateEvent& acEvent) noexcept
     UpdateRevealOtherPlayersEffect();
 }
 
+// A cast is synced either through spell cast sync or through its projectile, never both. Concentration casts
+// (except healing, which is covered by health sync) plus wards and invisibility go through spell cast sync;
+// fire-and-forget casts are synced by the projectile they launch. Spells and staff enchantments follow the
+// same rule: a staff used to go through both paths, and the extra replay of the cast on the other clients left
+// its effects behind, such as the light of a Staff of Magelight that never went away (issue #71).
+static bool IsSyncedThroughProjectile(const MagicItem* apMagicItem) noexcept
+{
+    if (!apMagicItem)
+        return false;
+
+    const std::optional<MagicSystem::CastingType> castingType = apMagicItem->GetCastingType();
+    if (!castingType)
+        return false;
+
+    if (apMagicItem->IsWardSpell() || apMagicItem->IsInvisibilitySpell())
+        return false;
+
+    return *castingType != MagicSystem::CastingType::CONCENTRATION || apMagicItem->IsHealingSpell();
+}
+
 void MagicService::OnSpellCastEvent(const SpellCastEvent& acEvent) const noexcept
 {
     if (!m_transport.IsConnected())
@@ -68,14 +89,11 @@ void MagicService::OnSpellCastEvent(const SpellCastEvent& acEvent) const noexcep
         return;
     }
 
-    // only sync concentration spells through spell cast sync, the rest through projectile sync for accuracy
-    if (SpellItem* pSpell = Cast<SpellItem>(TESForm::GetById(acEvent.SpellId)))
+    // only sync concentration casts through spell cast sync, the rest through projectile sync for accuracy
+    if (IsSyncedThroughProjectile(Cast<MagicItem>(TESForm::GetById(acEvent.SpellId))))
     {
-        if ((pSpell->eCastingType != MagicSystem::CastingType::CONCENTRATION || pSpell->IsHealingSpell()) && !pSpell->IsWardSpell() && !pSpell->IsInvisibilitySpell())
-        {
-            spdlog::debug("Canceled magic spell");
-            return;
-        }
+        spdlog::debug("Canceled magic spell");
+        return;
     }
 
     uint32_t formId = acEvent.pCaster->pCasterActor->formID;
@@ -174,6 +192,14 @@ void MagicService::OnNotifySpellCast(const NotifySpellCast& acMessage) const noe
     if (!pSpell)
     {
         spdlog::error("Could not find spell.");
+        return;
+    }
+
+    // Older clients still send fire-and-forget staff casts; their projectile arrives on its own, so replaying
+    // the cast here would duplicate it (see IsSyncedThroughProjectile).
+    if (Cast<EnchantmentItem>(pSpell) && IsSyncedThroughProjectile(pSpell))
+    {
+        spdlog::debug("{}: ignoring enchantment cast {:X} from caster {:X}, it is synced through its projectile", __FUNCTION__, pSpell->formID, acMessage.CasterId);
         return;
     }
 
