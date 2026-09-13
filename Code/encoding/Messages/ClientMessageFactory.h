@@ -10,6 +10,7 @@
 #include <Messages/RequestInventoryChanges.h>
 #include <Messages/RequestFactionsChanges.h>
 #include <Messages/RequestQuestUpdate.h>
+#include <Messages/RequestQuestSceneUpdate.h>
 #include <Messages/PartyInviteRequest.h>
 #include <Messages/PartyAcceptInviteRequest.h>
 #include <Messages/PartyLeaveRequest.h>

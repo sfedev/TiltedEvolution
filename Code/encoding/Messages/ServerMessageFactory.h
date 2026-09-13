@@ -13,6 +13,7 @@
 #include <Messages/NotifyFactionsChanges.h>
 #include <Messages/NotifyRemoveCharacter.h>
 #include <Messages/NotifyQuestUpdate.h>
+#include <Messages/NotifyQuestSceneUpdate.h>
 #include <Messages/NotifyPlayerList.h>
 #include <Messages/NotifyPartyInfo.h>
 #include <Messages/NotifyPartyInvite.h>
