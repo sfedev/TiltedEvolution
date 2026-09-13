@@ -1,0 +1,51 @@
+SKYRIM TOGETHER - PRUEBA PRIVADA
+
+1. Instala Skyrim Special Edition de Steam y abrelo una vez desde Steam.
+   Este playtest usa 1.7.104.0. En paquetes nuevos, el instalador consulta las
+   versiones admitidas incluidas en build-info.json por la compilacion.
+2. Extrae el ZIP jugable completo en una carpeta fuera de Skyrim/Data.
+   Si GitHub entrega un ZIP que contiene otro ZIP, extrae tambien el interior.
+3. Haz doble clic en Jugar-STR.cmd. Steam debe estar abierto.
+4. Si falta Address Library, descarga "All in one (Anniversary Edition)":
+   https://www.nexusmods.com/skyrimspecialedition/mods/32444
+   Extrae el archivo e indica esa carpeta cuando el script la pida.
+   Se conserva una copia local de esa dependencia para siguientes sesiones.
+5. El script detecta Skyrim, verifica el paquete, hace backup, instala STR
+   temporalmente y activa sus plugins. Si no encuentra Skyrim, pide su carpeta.
+6. No cierres la ventana del script. Carga el guardado de prueba posterior a
+   Helgen, pulsa F2 y conecta al servidor. Ambos jugadores y servidor deben
+   utilizar el mismo paquete. La conexion/party no se hace automaticamente.
+7. Al salir del juego, espera al mensaje de restauracion. Los archivos que
+   el instalador cambio vuelven a su estado anterior, incluidos plugins.txt
+   y steam_appid.txt. Despues puedes abrir Skyrim desde Steam como antes.
+
+SI SE CIERRA EL SCRIPT O SE APAGA EL PC
+
+Con el juego cerrado, ejecuta Restaurar-Skyrim.cmd antes de abrir Steam.
+Jugar-STR.cmd tambien recupera una sesion pendiente antes de empezar otra.
+No cambies los archivos del mod con otro gestor mientras esta sesion esta
+abierta: si detecta cambios ajenos, la restauracion se detiene para conservarlos.
+Las copias y recovery.json estan en %LOCALAPPDATA%\STR-Playtest\Backups.
+No borres esa carpeta mientras haya una recuperacion pendiente.
+
+ALCANCE
+
+- Restaura la instalacion ANTERIOR: si ya tenia mods, no los elimina.
+- No modifica guardados. Usa personajes separados para individual y prueba.
+  Restaurar archivos no convierte un guardado multijugador en uno sin mods.
+- Se conservan logs/configuracion creados por STR y carpetas vacias; no estan
+  activos en Skyrim normal. No se cambia la configuracion de Steam/Tailscale.
+- Requiere permisos de escritura en la carpeta del juego. No eleva permisos
+  ni instala dependencias del sistema o descargas de Nexus automaticamente.
+- Para alojar, ejecuta SkyrimTogetherReborn\SkyrimTogetherServer.exe desde
+  ESTA carpeta extraida; NO desde Skyrim\Data, que se restaura al salir.
+- Si quieres conservar una instalacion permanente gestionada por MO2/Vortex,
+  instala el paquete con tu gestor en vez de usar este instalador temporal.
+
+USO AVANZADO
+
+Jugar-STR.cmd -GamePath "D:\SteamLibrary\steamapps\common\Skyrim Special Edition"
+Jugar-STR.cmd -PackagePath "D:\Paquete-extraido" -AddressLibraryPath "D:\AddressLibrary"
+
+El manifiesto comprueba integridad, no constituye una firma de confianza.
+Este paquete de integracion sirve para probar; no es una release oficial.
