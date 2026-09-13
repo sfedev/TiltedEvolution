@@ -57,6 +57,26 @@ void MagicService::OnUpdate(const UpdateEvent& acEvent) noexcept
     UpdateRevealOtherPlayersEffect();
 }
 
+// A summoned creature is replicated to the other players as a regular actor by the client that
+// owns it (see IsPlayerSummon in CharacterService). Replaying the cast that summoned it on the
+// other clients spawns a second, unowned creature next to the replicated one, which then fights
+// it. Fire-and-forget summon *spells* never reach spell cast sync (they go through projectile
+// sync), but staff enchantments such as the Sanguine Rose (DA14StaffEnchSummonDremora) or the
+// Staff of the Familiar are EnchantmentItems, so they did (issue #791).
+static bool HasSummonEffect(const MagicItem* apMagicItem) noexcept
+{
+    if (!apMagicItem)
+        return false;
+
+    for (const EffectItem* pEffect : apMagicItem->listOfEffects)
+    {
+        if (pEffect && pEffect->pEffectSetting && pEffect->IsSummonEffect())
+            return true;
+    }
+
+    return false;
+}
+
 void MagicService::OnSpellCastEvent(const SpellCastEvent& acEvent) const noexcept
 {
     if (!m_transport.IsConnected())
@@ -68,8 +88,16 @@ void MagicService::OnSpellCastEvent(const SpellCastEvent& acEvent) const noexcep
         return;
     }
 
+    TESForm* pMagicForm = TESForm::GetById(acEvent.SpellId);
+
+    if (HasSummonEffect(Cast<MagicItem>(pMagicForm)))
+    {
+        spdlog::debug("{}: not syncing summon cast {:X}, the summoned actor is synced by its owner", __FUNCTION__, acEvent.SpellId);
+        return;
+    }
+
     // only sync concentration spells through spell cast sync, the rest through projectile sync for accuracy
-    if (SpellItem* pSpell = Cast<SpellItem>(TESForm::GetById(acEvent.SpellId)))
+    if (SpellItem* pSpell = Cast<SpellItem>(pMagicForm))
     {
         if ((pSpell->eCastingType != MagicSystem::CastingType::CONCENTRATION || pSpell->IsHealingSpell()) && !pSpell->IsWardSpell() && !pSpell->IsInvisibilitySpell())
         {
@@ -174,6 +202,14 @@ void MagicService::OnNotifySpellCast(const NotifySpellCast& acMessage) const noe
     if (!pSpell)
     {
         spdlog::error("Could not find spell.");
+        return;
+    }
+
+    // Never replay a summon locally, whatever the sender decided: the creature arrives as a
+    // replicated actor from its owner (see HasSummonEffect above).
+    if (HasSummonEffect(pSpell))
+    {
+        spdlog::debug("{}: ignoring remote summon cast {:X} from caster {:X}", __FUNCTION__, pSpell->formID, acMessage.CasterId);
         return;
     }
 
