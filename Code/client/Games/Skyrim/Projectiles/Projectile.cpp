@@ -40,15 +40,14 @@ BSPointerHandle<Projectile>* Projectile::Launch(BSPointerHandle<Projectile>* apR
 
 BSPointerHandle<Projectile>* TP_MAKE_THISCALL(HookLaunch, BSPointerHandle<Projectile>, Projectile::LaunchData& arData)
 {
-    // sync concentration spells through spell cast sync, the rest through projectile sync
+    // sync concentration casts (spells and staff enchantments alike) through spell cast sync, the rest through
+    // projectile sync; the replayed cast launches its own projectiles locally, so they are never sent
     if (arData.pSpell)
     {
-        if (auto* pSpell = Cast<SpellItem>(arData.pSpell))
+        const std::optional<MagicSystem::CastingType> castingType = arData.pSpell->GetCastingType();
+        if (castingType && *castingType == MagicSystem::CastingType::CONCENTRATION)
         {
-            if (pSpell->eCastingType == MagicSystem::CastingType::CONCENTRATION)
-            {
-                return TiltedPhoques::ThisCall(RealLaunch, apThis, arData);
-            }
+            return TiltedPhoques::ThisCall(RealLaunch, apThis, arData);
         }
     }
 
