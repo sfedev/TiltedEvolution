@@ -58,26 +58,6 @@ void MagicService::OnUpdate(const UpdateEvent& acEvent) noexcept
     UpdateRevealOtherPlayersEffect();
 }
 
-// A summoned creature is replicated to the other players as a regular actor by the client that
-// owns it (see IsPlayerSummon in CharacterService). Replaying the cast that summoned it on the
-// other clients spawns a second, unowned creature next to the replicated one, which then fights
-// it. Fire-and-forget summon *spells* never reach spell cast sync (they go through projectile
-// sync), but staff enchantments such as the Sanguine Rose (DA14StaffEnchSummonDremora) or the
-// Staff of the Familiar are EnchantmentItems, so they did (issue #791).
-static bool HasSummonEffect(const MagicItem* apMagicItem) noexcept
-{
-    if (!apMagicItem)
-        return false;
-
-    for (const EffectItem* pEffect : apMagicItem->listOfEffects)
-    {
-        if (pEffect && pEffect->pEffectSetting && pEffect->IsSummonEffect())
-            return true;
-    }
-
-    return false;
-}
-
 // A cast is synced either through spell cast sync or through its projectile, never both. Concentration casts
 // (except healing, which is covered by health sync) plus wards and invisibility go through spell cast sync;
 // fire-and-forget casts are synced by the projectile they launch. Spells and staff enchantments follow the
@@ -111,7 +91,8 @@ void MagicService::OnSpellCastEvent(const SpellCastEvent& acEvent) const noexcep
 
     TESForm* pMagicForm = TESForm::GetById(acEvent.SpellId);
 
-    if (HasSummonEffect(Cast<MagicItem>(pMagicForm)))
+    // Summoned creatures are replicated by their owning client; replaying the cast creates duplicates (#791).
+    if (const MagicItem* pMagicItem = Cast<MagicItem>(pMagicForm); pMagicItem && pMagicItem->HasSummonEffect())
     {
         spdlog::debug("{}: not syncing summon cast {:X}, the summoned actor is synced by its owner", __FUNCTION__, acEvent.SpellId);
         return;
@@ -224,8 +205,8 @@ void MagicService::OnNotifySpellCast(const NotifySpellCast& acMessage) const noe
     }
 
     // Never replay a summon locally, whatever the sender decided: the creature arrives as a
-    // replicated actor from its owner (see HasSummonEffect above).
-    if (HasSummonEffect(pSpell))
+    // replicated actor from its owner.
+    if (pSpell->HasSummonEffect())
     {
         spdlog::debug("{}: ignoring remote summon cast {:X} from caster {:X}", __FUNCTION__, pSpell->formID, acMessage.CasterId);
         return;

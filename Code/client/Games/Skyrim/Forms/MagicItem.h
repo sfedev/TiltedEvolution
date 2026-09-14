@@ -17,6 +17,7 @@ struct MagicItem : TESBoundObject
     bool IsHealingSpell() const noexcept;
     bool IsBuffSpell() const noexcept;
     bool IsBoundWeaponSpell() noexcept;
+    bool HasSummonEffect() const noexcept;
 
     // Casting type of spells and staff enchantments, which decides how a cast is synced. Other magic items
     // (scrolls, potions, ingredients) carry no casting type here and return nothing.

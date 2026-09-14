@@ -336,7 +336,7 @@ void CharacterService::OnDisconnected(const DisconnectedEvent& acDisconnectedEve
         {
             auto& stage = pActor->GetExtension()->Reconciliation;
             // Don't leave the actor disabled if we disconnect before re-enabling it.
-            if (stage == ActorExtension::ReconciliationStage::Disabled && !pActor->IsDeleted())
+            if (stage == ActorExtension::ReconciliationStage::WaitingForDisable && !pActor->IsDeleted())
                 pActor->EnableImpl();
 
             stage = ActorExtension::ReconciliationStage::None;
@@ -499,24 +499,18 @@ void CharacterService::OnCharacterSpawn(const CharacterSpawnRequest& acMessage) 
         if (acMessage.BaseId != GameId{})
         {
             // Prefer the owner's resolved leveled pick over the lossy template base
-            GameId baseId = acMessage.BaseId;
-            uint32_t npcId = World::Get().GetModSystem().GetGameId(baseId);
             if (acMessage.LeveledNpcPickId != GameId{})
-            {
-                if (const uint32_t cPickNpcId = World::Get().GetModSystem().GetGameId(acMessage.LeveledNpcPickId))
-                {
-                    baseId = acMessage.LeveledNpcPickId;
-                    npcId = cPickNpcId;
-                }
-            }
+                pNpc = Cast<TESNPC>(TESForm::GetById(m_world.GetModSystem().GetGameId(acMessage.LeveledNpcPickId)));
 
-            if (npcId == 0)
+            if (!pNpc)
+                pNpc = Cast<TESNPC>(TESForm::GetById(m_world.GetModSystem().GetGameId(acMessage.BaseId)));
+
+            if (!pNpc)
             {
-                spdlog::error("Failed to retrieve NPC, it will not be spawned, possibly missing mod, base: {:X}:{:X}, form: {:X}:{:X}", baseId.BaseId, baseId.ModId, acMessage.FormId.BaseId, acMessage.FormId.ModId);
+                spdlog::error("Failed to retrieve NPC, it will not be spawned, possibly missing mod, base: {:X}:{:X}, form: {:X}:{:X}", acMessage.BaseId.BaseId, acMessage.BaseId.ModId, acMessage.FormId.BaseId, acMessage.FormId.ModId);
                 return;
             }
 
-            pNpc = Cast<TESNPC>(TESForm::GetById(npcId));
             pNpc->Deserialize(acMessage.AppearanceBuffer, acMessage.ChangeFlags);
         }
         else
@@ -568,7 +562,8 @@ void CharacterService::OnCharacterSpawn(const CharacterSpawnRequest& acMessage) 
 
     spdlog::info("CharacterSpawnRequest, server id: {:X}, form id: {:X}", acMessage.ServerId, pActor->formID);
 
-    if (pActor->IsDisabled())
+    // Pending reconciliation re-enables the actor after applying the owner's pick.
+    if (pActor->IsDisabled() && pActor->GetExtension()->Reconciliation != ActorExtension::ReconciliationStage::WaitingForDisable)
     {
         spdlog::warn("Disabled actor is being re-enabled: {:X}", pActor->formID);
         pActor->EnableImpl();
@@ -1440,21 +1435,21 @@ void CharacterService::RequestServerAssignment(const entt::entity aEntity) const
     message.IsMount = pActor->IsMount();
     message.IsPlayerSummon = pActor->GetCommandingActor() && pActor->GetCommandingActor()->formID == 0x14;
 
-    if (pNpc->IsTemporary())
+    if (const TESNPC* pPick = pActor->GetLeveledPick())
     {
-        if (const TESNPC* pPick = pActor->GetLeveledPick())
-        {
-            const uint32_t pickFormId = pPick->formID;
-            if (m_world.GetModSystem().GetServerModId(pickFormId, message.LeveledNpcPickId))
-                spdlog::info("Captured leveled NPC pick {:X} for actor {:X} (temp base {:X})", pickFormId, pActor->formID, pNpc->formID);
-            else
-                spdlog::warn("Leveled NPC pick {:X} has no server id, identity sync skipped", pickFormId);
-        }
+        const uint32_t pickFormId = pPick->formID;
+        if (m_world.GetModSystem().GetServerModId(pickFormId, message.LeveledNpcPickId))
+            spdlog::info("Captured leveled NPC pick {:X} for actor {:X} (base {:X})", pickFormId, pActor->formID, pNpc->formID);
         else
-            spdlog::info("No leveled pick recoverable for temp base {:X} (actor {:X}), identity sync unavailable", pNpc->formID, pActor->formID);
-
-        pNpc = pNpc->GetTemplateBase();
+            spdlog::warn("Leveled NPC pick {:X} has no server id, identity sync skipped", pickFormId);
     }
+    else if (pNpc->IsTemporary())
+    {
+        spdlog::info("No leveled pick recoverable for temp base {:X} (actor {:X}), identity sync unavailable", pNpc->formID, pActor->formID);
+    }
+
+    if (pNpc->IsTemporary())
+        pNpc = pNpc->GetTemplateBase();
 
     if (isTemporary)
     {
@@ -1578,24 +1573,18 @@ Actor* CharacterService::CreateCharacterForEntity(entt::entity aEntity) const no
         if (acMessage.BaseId != GameId{})
         {
             // Prefer the owner's resolved leveled pick over the lossy template base
-            GameId baseId = acMessage.BaseId;
-            uint32_t npcId = World::Get().GetModSystem().GetGameId(baseId);
             if (acMessage.LeveledNpcPickId != GameId{})
-            {
-                if (const uint32_t cPickNpcId = World::Get().GetModSystem().GetGameId(acMessage.LeveledNpcPickId))
-                {
-                    baseId = acMessage.LeveledNpcPickId;
-                    npcId = cPickNpcId;
-                }
-            }
+                pNpc = Cast<TESNPC>(TESForm::GetById(m_world.GetModSystem().GetGameId(acMessage.LeveledNpcPickId)));
 
-            if (npcId == 0)
+            if (!pNpc)
+                pNpc = Cast<TESNPC>(TESForm::GetById(m_world.GetModSystem().GetGameId(acMessage.BaseId)));
+
+            if (!pNpc)
             {
                 spdlog::error("Failed to retrieve NPC, it will not be spawned, possibly missing mod");
                 return nullptr;
             }
 
-            pNpc = Cast<TESNPC>(TESForm::GetById(npcId));
             pNpc->Deserialize(acMessage.AppearanceBuffer, acMessage.ChangeFlags);
         }
         else
@@ -1743,7 +1732,7 @@ void CharacterService::ProcessLeveledConforms() noexcept
                 continue;
             }
 
-            if (!pActor->GetNiNode())
+            if (pActor->IsDisabled() || !pActor->GetNiNode())
             {
                 ++it;
                 continue;
@@ -1761,11 +1750,17 @@ void CharacterService::ProcessLeveledConforms() noexcept
             stage = ReconciliationStage::None;
         }
 
-        if (stage == ReconciliationStage::Disabled)
+        if (stage == ReconciliationStage::WaitingForDisable)
         {
-            if (!pActor->IsDisabled())
-                spdlog::warn("Re-enabling leveled actor {:X} with pick {:X} before its disabled flag is set", it->first, cPickFormId);
-            // Teardown ran last tick; rebuild the 3D from the pick
+            if (!pActor->IsDisabled() || pActor->GetNiNode())
+            {
+                spdlog::debug("Waiting for leveled actor {:X} to finish disabling before applying pick {:X}, disabled: {}, has 3D: {}",
+                    it->first, cPickFormId, pActor->IsDisabled(), pActor->GetNiNode() != nullptr);
+                ++it;
+                continue;
+            }
+
+            // Disable and 3D teardown have completed; rebuild from the pick.
             pActor->baseForm = pPick;
             pActor->EnableImpl();
 
@@ -1787,8 +1782,10 @@ void CharacterService::ProcessLeveledConforms() noexcept
             continue;
         }
 
+        // DisableImpl() is asynchronous: it only queues a request to disable this actor.
+        // Wait for the disabled flag and old 3D removal before changing the base.
         pActor->DisableImpl();
-        stage = ReconciliationStage::Disabled;
+        stage = ReconciliationStage::WaitingForDisable;
         ++it;
     }
 }
