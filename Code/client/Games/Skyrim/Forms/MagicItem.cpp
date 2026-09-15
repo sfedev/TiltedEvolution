@@ -1,5 +1,18 @@
 #include "MagicItem.h"
+#include "SpellItem.h"
+#include "EnchantmentItem.h"
 #include <Games/TES.h>
+
+std::optional<MagicSystem::CastingType> MagicItem::GetCastingType() const noexcept
+{
+    if (const SpellItem* pSpell = Cast<const SpellItem>(this))
+        return pSpell->eCastingType;
+
+    if (const EnchantmentItem* pEnchantment = Cast<const EnchantmentItem>(this))
+        return pEnchantment->eCastingType;
+
+    return std::nullopt;
+}
 
 bool MagicItem::IsWardSpell() const noexcept
 {
