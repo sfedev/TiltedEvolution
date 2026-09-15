@@ -1,3 +1,4 @@
+#include <cstring>
 #include "SubtitleManager.h"
 #include "MenuTopicManager.h"
 
