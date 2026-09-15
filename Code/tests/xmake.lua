@@ -19,7 +19,7 @@ target("TPTests")
 option("server_tests")
     set_default(false)
     set_showmenu(true)
-    set_description("Build isolated server object lifecycle tests")
+    set_description("Build isolated server tests (object lifecycle, party invitations)")
 option_end()
 
 if has_config("server_tests") then
