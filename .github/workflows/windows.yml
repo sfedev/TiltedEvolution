@@ -164,7 +164,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: SkyrimTogether-${{ env.ARTIFACT_VERSION }}-windows-${{ matrix.arch }}
-          retention-days: 7
+          retention-days: 2
           if-no-files-found: error
           path: release-assets/SkyrimTogether-${{ env.ARTIFACT_VERSION }}-windows-${{ matrix.arch }}.zip
 
@@ -173,6 +173,6 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: SkyrimTogether-${{ env.ARTIFACT_VERSION }}-windows-${{ matrix.arch }}-debug-symbols
-          retention-days: 7
+          retention-days: 2
           if-no-files-found: error
           path: release-assets/SkyrimTogether-${{ env.ARTIFACT_VERSION }}-windows-${{ matrix.arch }}-debug-symbols.zip
