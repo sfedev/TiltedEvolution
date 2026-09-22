@@ -1,5 +1,6 @@
 
 #include <BSGraphics/BSGraphicsRenderer.h>
+#include <LocalSplitscreen.h>
 
 struct BSInputDeviceManager;
 
@@ -7,7 +8,9 @@ void (*BSInputDeviceManager_PollInputDevices)(BSInputDeviceManager*, float) = nu
 
 void Hook_BSInputDeviceManager_PollInputDevices(BSInputDeviceManager* inputDeviceMgr, float afDelta)
 {
-    if (!BSGraphics::GetMainWindow()->IsForeground())
+    // The split screen gamepad instance never has focus: XInput still reports the pad there, while the
+    // DirectInput keyboard and mouse are foreground devices and stay with the focused instance.
+    if (!BSGraphics::GetMainWindow()->IsForeground() && !LocalSplitscreen::AllowBackgroundInput())
         return;
 
     BSInputDeviceManager_PollInputDevices(inputDeviceMgr, afDelta);

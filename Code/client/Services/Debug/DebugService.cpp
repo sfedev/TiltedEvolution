@@ -1,4 +1,5 @@
 #include <BranchInfo.h>
+#include <LocalSplitscreen.h>
 
 #include <Havok/hkbStateMachine.h>
 #include <Structs/AnimationGraphDescriptorManager.h>
@@ -150,8 +151,54 @@ void DebugService::OnMoveActor(const MoveActorEvent& acEvent) noexcept
 
 extern thread_local bool g_forceAnimation;
 
+// Split screen playtests: the gamepad instance has no keyboard to open the UI with, so connect for it.
+// Runs without window focus. Stops after the first successful connection so a manual disconnect sticks.
+static void UpdateSplitscreenAutoConnect(TransportService& aTransport) noexcept
+{
+    using TClock = std::chrono::steady_clock;
+
+    static bool s_done = LocalSplitscreen::GetAutoConnectEndpoint().empty();
+    static TClock::time_point s_nextAttempt{};
+    static TClock::time_point s_inGameSince{};
+
+    if (s_done)
+        return;
+
+    if (aTransport.IsOnline())
+    {
+        s_done = true;
+        return;
+    }
+
+    auto* pPlayer = PlayerCharacter::Get();
+    if (!pPlayer || !pPlayer->GetNiNode())
+    {
+        s_inGameSince = {};
+        return;
+    }
+
+    const auto now = TClock::now();
+    if (s_inGameSince == TClock::time_point{})
+        s_inGameSince = now;
+
+    // Let the save settle before connecting, then retry in case the server is still starting
+    if (now - s_inGameSince < 5s || now < s_nextAttempt)
+        return;
+
+    // Connect() does not release a previous attempt that is still pending
+    if (s_nextAttempt != TClock::time_point{})
+        aTransport.Close();
+
+    s_nextAttempt = now + 15s;
+
+    spdlog::info("Split screen: connecting to {}", LocalSplitscreen::GetAutoConnectEndpoint());
+    aTransport.Connect(LocalSplitscreen::GetAutoConnectEndpoint());
+}
+
 void DebugService::OnUpdate(const UpdateEvent& acUpdateEvent) noexcept
 {
+    UpdateSplitscreenAutoConnect(m_transport);
+
     if (!BSGraphics::GetMainWindow()->IsForeground())
         return;
 
@@ -427,6 +474,12 @@ void DebugService::OnDraw() noexcept
 
 void DebugService::ArrangeGameWindows(HWND aThisWindow) noexcept
 {
+    if (LocalSplitscreen::HasWindowRect())
+    {
+        LocalSplitscreen::ArrangeWindow(aThisWindow);
+        return;
+    }
+
     // This function conveniently arranges multiple game windows (multi-monitor window rearrangement is
     // not implemented)
 #if (!IS_MASTER)

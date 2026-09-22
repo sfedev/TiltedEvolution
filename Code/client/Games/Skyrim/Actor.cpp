@@ -63,6 +63,7 @@
 #include <BSGraphics/BSGraphicsRenderer.h>
 #include <Camera/PlayerCamera.h>
 #include <Interface/UI.h>
+#include <LocalSplitscreen.h>
 #include <Misc/BSFixedString.h>
 #include <NetImmerse/NiNode.h>
 #endif
@@ -141,9 +142,9 @@ void LogDropEnvironment(Actor* apActor, uint32_t aDropSeq, bool aQueued) noexcep
     auto* pPlayerCamera = PlayerCamera::Get();
 
     spdlog::info(
-        "[DropSync] drop.env seq={} actor={:X} isPlayer={} queued={} focus={} firstPerson={} invMenu={} contMenu={} favMenu={} sitting={} weaponDrawn={} "
+        "[DropSync] drop.env seq={} actor={:X} isPlayer={} queued={} bgInput={} focus={} firstPerson={} invMenu={} contMenu={} favMenu={} sitting={} weaponDrawn={} "
         "actorPos=({:.1f},{:.1f},{:.1f}) actorRot=({:.4f},{:.4f},{:.4f})",
-        aDropSeq, apActor->formID, apActor == static_cast<Actor*>(PlayerCharacter::Get()), aQueued,
+        aDropSeq, apActor->formID, apActor == static_cast<Actor*>(PlayerCharacter::Get()), aQueued, LocalSplitscreen::AllowBackgroundInput(),
         pWindow != nullptr && pWindow->IsForeground(), pPlayerCamera != nullptr && pPlayerCamera->IsFirstPerson(),
         pUI != nullptr && pUI->GetMenuOpen(BSFixedString("InventoryMenu")), pUI != nullptr && pUI->GetMenuOpen(BSFixedString("ContainerMenu")),
         pUI != nullptr && pUI->GetMenuOpen(BSFixedString("FavoritesMenu")), apActor->actorState.IsSittingOrSleeping(), apActor->actorState.IsWeaponDrawn(),
