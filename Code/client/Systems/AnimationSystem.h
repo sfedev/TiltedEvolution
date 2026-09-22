@@ -38,8 +38,9 @@ struct AnimationSystem
      * @brief Adds multiple actions to be replayed.
      * @param aAnimationComponent The animation component attached to the actor in question.
      * @param acReplay The replay data.
+     * @param apActor The local actor receiving the replay, used to detect a stale seated or sleeping pose.
      */
-    static void AddActionsForReplay(RemoteAnimationComponent& aAnimationComponent, const ActionReplayChain& acReplay) noexcept;
+    static void AddActionsForReplay(RemoteAnimationComponent& aAnimationComponent, const ActionReplayChain& acReplay, const Actor* apActor = nullptr) noexcept;
     /**
      * @brief Adds an action (animation) to be processed.
      * @param aAnimationComponent The animation component attached to the actor in question.

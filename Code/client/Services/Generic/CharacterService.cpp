@@ -453,7 +453,7 @@ void CharacterService::OnAssignCharacter(const AssignCharacterResponse& acMessag
         m_world.remove<EarlyAnimationBufferComponent>(cEntity);
         InterpolationSystem::Setup(m_world, cEntity);
         AnimationSystem::Setup(m_world, cEntity);
-        AnimationSystem::AddActionsForReplay(m_world.get<RemoteAnimationComponent>(cEntity), acMessage.ActionsToReplay);
+        AnimationSystem::AddActionsForReplay(m_world.get<RemoteAnimationComponent>(cEntity), acMessage.ActionsToReplay, pActor);
 
 #if (!IS_MASTER)
         m_world.emplace_or_replace<ReplayedActionsDebugComponent>(cEntity, acMessage.ActionsToReplay);
@@ -610,7 +610,7 @@ void CharacterService::OnCharacterSpawn(const CharacterSpawnRequest& acMessage) 
 
     auto& remoteAnimationComponent = m_world.get<RemoteAnimationComponent>(*entity);
 
-    AnimationSystem::AddActionsForReplay(remoteAnimationComponent, acMessage.ActionsToReplay);
+    AnimationSystem::AddActionsForReplay(remoteAnimationComponent, acMessage.ActionsToReplay, pActor);
 
 #if (!IS_MASTER)
     m_world.emplace_or_replace<ReplayedActionsDebugComponent>(*entity, acMessage.ActionsToReplay);

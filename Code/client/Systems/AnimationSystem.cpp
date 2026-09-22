@@ -25,6 +25,20 @@ void AnimationSystem::Update(World& aWorld, Actor* apActor, RemoteAnimationCompo
 {
     auto& actions = aAnimationComponent.TimePoints;
 
+    // A pending reset does not wait for an action: a replay chain that was only an exit action arrives empty,
+    // and the actor may still be in the state this client loaded it in (e.g. sitting).
+    if (aAnimationComponent.ResetAnimationGraphForReplay)
+    {
+        if (!apActor->animationGraphHolder.IsReady())
+            return;
+
+        spdlog::info("Reverting the animation graph of remote actor {:X} before replaying {} actions", apActor->formID, aAnimationComponent.ReplayCount);
+
+        apActor->animationGraphHolder.RevertAnimationGraphManager();
+        apActor->actorState.flags1 &= ~ActorState::kSitSleepStateMask;
+        aAnimationComponent.ResetAnimationGraphForReplay = false;
+    }
+
     const auto it = std::begin(actions);
     if (it != std::end(actions) && it->Tick <= aTick)
     {
@@ -33,11 +47,6 @@ void AnimationSystem::Update(World& aWorld, Actor* apActor, RemoteAnimationCompo
         {
             // Animation graph not ready, keep the action in queue and try again later
             return;
-        }
-        if (aAnimationComponent.ReplayCount > 0 && aAnimationComponent.ResetAnimationGraphForReplay)
-        {
-            apActor->animationGraphHolder.RevertAnimationGraphManager();
-            aAnimationComponent.ResetAnimationGraphForReplay = false;
         }
 
         const auto& first = *it;
@@ -82,12 +91,24 @@ void AnimationSystem::Clean(World& aWorld, const entt::entity aEntity) noexcept
 }
 
 void AnimationSystem::AddActionsForReplay(RemoteAnimationComponent& aAnimationComponent,
-                                          const ActionReplayChain& acReplay) noexcept
+                                          const ActionReplayChain& acReplay, const Actor* apActor) noexcept
 {
     aAnimationComponent.TimePoints.insert(aAnimationComponent.TimePoints.end(), acReplay.Actions.begin(),
                                           acReplay.Actions.end());
     aAnimationComponent.ReplayCount = acReplay.Actions.size();
     aAnimationComponent.ResetAnimationGraphForReplay = acReplay.ResetAnimationGraph;
+
+    // This client may have loaded the actor sitting or sleeping through its own AI package while the owner has it
+    // standing: the chain then has no exit action and the actor would keep its seated graph while moving around.
+    // The owner's state rides on every action, so the latest one tells whether the local pose is stale. The reset
+    // runs before the replay, so an owner that sat down afterwards still ends up seated.
+    if (apActor && !acReplay.ResetAnimationGraph && !acReplay.Actions.empty() && apActor->actorState.IsSittingOrSleeping() &&
+        !ActorState::IsSittingOrSleeping(acReplay.Actions.back().State1))
+    {
+        spdlog::info("Resetting the animation graph of remote actor {:X}: seated or asleep locally (state {:X}) but not for its owner (last action '{}')", apActor->formID,
+                     (apActor->actorState.flags1 & ActorState::kSitSleepStateMask) >> 14, acReplay.Actions.back().EventName.c_str());
+        aAnimationComponent.ResetAnimationGraphForReplay = true;
+    }
 }
 
 void AnimationSystem::AddAction(RemoteAnimationComponent& aAnimationComponent, const std::string& acActionDiff) noexcept
