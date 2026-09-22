@@ -248,8 +248,9 @@ struct Actor : TESObjectREFR
     void Kill() noexcept;
     void Respawn() noexcept;
     void PickUpObject(TESObjectREFR* apObject, int32_t aCount, bool aUnk1, float aUnk2) noexcept;
-    void DropObject(TESBoundObject* apObject, ExtraDataList* apExtraData, int32_t aCount, NiPoint3* apLocation, NiPoint3* apRotation) noexcept;
-    void DropOrPickUpObject(const Inventory::Entry& arEntry, NiPoint3* apPoint, NiPoint3* apRotate) noexcept;
+    // Both return the handle of the ground reference the game created, 0 if none
+    uint32_t DropObject(TESBoundObject* apObject, ExtraDataList* apExtraData, int32_t aCount, NiPoint3* apLocation, NiPoint3* apRotation) noexcept;
+    uint32_t DropOrPickUpObject(const Inventory::Entry& arEntry, NiPoint3* apPoint, NiPoint3* apRotate) noexcept;
     float SpeakSound(const char* pFile);
     void StartCombatEx(Actor* apTarget) noexcept;
     void SetCombatTargetEx(Actor* apTarget) noexcept;

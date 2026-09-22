@@ -7,6 +7,7 @@
 #include <Games/Overrides.h>
 
 #include <Events/InventoryChangeEvent.h>
+#include <DropSync.h>
 #include <Events/BeastFormChangeEvent.h>
 #include <Events/AddExperienceEvent.h>
 #include <Events/SetWaypointEvent.h>
@@ -164,6 +165,9 @@ void PlayerCharacter::RemoveWaypoint() noexcept
 
 char TP_MAKE_THISCALL(HookPickUpObject, PlayerCharacter, TESObjectREFR* apObject, int32_t aCount, bool aUnk1, bool aUnk2)
 {
+    if (ScopedInventoryOverride::IsOverriden())
+        return TiltedPhoques::ThisCall(RealPickUpObject, apThis, apObject, aCount, aUnk1, aUnk2);
+
     auto& modSystem = World::Get().GetModSystem();
 
     Inventory::Entry item{};
@@ -186,8 +190,26 @@ char TP_MAKE_THISCALL(HookPickUpObject, PlayerCharacter, TESObjectREFR* apObject
         InventoryChangeEvent event(apThis->formID, std::move(item), false, shouldUpdateClients);
         event.ServerId = ownershipToken->ServerId;
         event.OwnershipEpoch = ownershipToken->OwnershipEpoch;
+
+        // Original references can also be tracked drops. The service decides which network path owns this pickup.
+        if (!ScopedActivateOverride::IsOverriden())
+        {
+            event.GroundRefHandle = apObject->GetHandle().handle.iBits;
+            event.GroundRefFormId = apObject->formID;
+            event.GroundRefBaseId = apObject->baseForm->formID;
+
+#if TP_DROPSYNC_DIAG
+            spdlog::info(
+                "[DropSync] pickup.begin hook=Player ref={:X} handle={:X} base={:X} aCount={} entryCount={} flags={:X} pos=({:.1f},{:.1f},{:.1f}) cell={:X}", apObject->formID,
+                event.GroundRefHandle, event.GroundRefBaseId, aCount, event.Item.Count, apObject->flags, apObject->position.x, apObject->position.y, apObject->position.z,
+                apObject->parentCell ? apObject->parentCell->formID : 0);
+#endif
+        }
+
         World::Get().GetRunner().Trigger(std::move(event));
     }
+    else if (World::Get().GetTransport().IsOnline() && apObject->IsTemporary())
+        spdlog::warn("[DropSync] pickup not sent: the player has no ownership token (ref={:X} base={:X} count={})", apObject->formID, apObject->baseForm->formID, aCount);
 
     ScopedInventoryOverride _;
 

@@ -37,4 +37,12 @@ struct InventoryChangeEvent
     Inventory::Entry Item{};
     bool Drop = false;
     bool UpdateClients = true;
+
+    // Dropped item sync (see DropSync.h); values only, the reference may be gone when the event is handled.
+    // On a drop: the sequence number given to it by the hook, matched later with its DroppedItemEvent.
+    uint32_t DropSeq{};
+    // On a local pickup: identity captured before consumption, including reused original references.
+    uint32_t GroundRefHandle{};
+    uint32_t GroundRefFormId{};
+    uint32_t GroundRefBaseId{};
 };

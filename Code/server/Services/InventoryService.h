@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Events/PacketEvent.h>
+#include "DropClaims.h"
 
 struct World;
 struct UpdateEvent;
@@ -33,6 +34,7 @@ public:
 
 private:
     World& m_world;
+    DropClaims m_dropClaims;
 
     entt::scoped_connection m_inventoryChangeConnection;
     entt::scoped_connection m_equipmentChangeConnection;

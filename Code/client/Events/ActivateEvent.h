@@ -18,6 +18,8 @@ struct ActivateEvent
         , Unk1(aUnk1)
         , PreActivationOpenState(aPreActivationOpenState)
         , ActivateFlag(aActivateFlag)
+        , ObjectFormId(apObject->formID)
+        , ObjectBaseFormId(apObject->baseForm ? apObject->baseForm->formID : 0)
     {
     }
 
@@ -29,4 +31,7 @@ struct ActivateEvent
     uint8_t Unk1;
     TESObjectREFR::OpenState PreActivationOpenState;
     bool ActivateFlag;
+    // Snapshot before activation can consume the object. Do not dereference pObject to route a dropped pickup.
+    uint32_t ObjectFormId{};
+    uint32_t ObjectBaseFormId{};
 };

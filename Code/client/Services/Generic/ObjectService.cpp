@@ -1,4 +1,5 @@
 #include <Services/ObjectService.h>
+#include <Services/InventoryService.h>
 #include <Systems/ObjectSystem.h>
 
 #include <World.h>
@@ -247,6 +248,14 @@ entt::entity ObjectService::CreateObjectEntity(const uint32_t acFormId, const ui
 
 void ObjectService::OnActivate(const ActivateEvent& acEvent) noexcept
 {
+    // HookActivate queues this before the pickup event. Use its immutable identity: the engine may already
+    // have consumed the reference. DropSync must be the only network path for a tracked original item.
+    if (m_transport.IsConnected() && m_world.ctx().at<InventoryService>().IsTrackedDrop(acEvent.ObjectFormId, acEvent.ObjectBaseFormId))
+    {
+        spdlog::info("[DropSync] activation routed to pickup: ref={:X} base={:X}", acEvent.ObjectFormId, acEvent.ObjectBaseFormId);
+        return;
+    }
+
     if (acEvent.ActivateFlag)
     {
         acEvent.pObject->Activate(acEvent.pActivator, acEvent.Unk1, acEvent.pObjectToGet, acEvent.Count, acEvent.DefaultProcessing);

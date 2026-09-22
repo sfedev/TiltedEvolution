@@ -114,5 +114,6 @@ enum ServerOpcode : unsigned char
     kNotifyRemoveWaypoint,
     kNotifySetTimeResult,
     kNotifyRemoveObjects,
+    kNotifyDropPickupRejected,
     kServerOpcodeMax
 };

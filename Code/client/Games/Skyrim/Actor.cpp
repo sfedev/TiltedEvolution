@@ -1,4 +1,5 @@
 #include <Games/References.h>
+#include <atomic>
 #include <Games/Skyrim/EquipManager.h>
 #include <AI/AIProcess.h>
 #include <Misc/MiddleProcess.h>
@@ -15,6 +16,8 @@
 
 #include <Events/HealthChangeEvent.h>
 #include <Events/InventoryChangeEvent.h>
+#include <Events/DroppedItemEvent.h>
+#include <DropSync.h>
 #include <Events/MountEvent.h>
 #include <Events/DialogueEvent.h>
 #include <Games/Misc/MenuTopicManager.h>
@@ -56,22 +59,195 @@
 
 #include <ModCompat/BehaviorVar.h>
 
+#if TP_DROPSYNC_DIAG
+#include <BSGraphics/BSGraphicsRenderer.h>
+#include <Camera/PlayerCamera.h>
+#include <Interface/UI.h>
+#include <Misc/BSFixedString.h>
+#include <NetImmerse/NiNode.h>
+#endif
+
 namespace
 {
-void QueueActorInventoryChange(Actor* apActor, InventoryChangeEvent aEvent, TESObjectREFR* apTransferReference = nullptr)
+// Returns whether the change was queued for the server
+bool QueueActorInventoryChange(Actor* apActor, InventoryChangeEvent aEvent, TESObjectREFR* apTransferReference = nullptr)
 {
     auto ownershipToken = Utils::GetLocalOwnershipToken(apActor->formID);
     if (!ownershipToken && apTransferReference == PlayerCharacter::Get())
         ownershipToken = Utils::GetRemoteOwnershipToken(apActor->formID);
 
     if (!ownershipToken)
-        return;
+    {
+        // A drop or a ground pickup that never reaches the server leaves the other clients with a stale copy
+        if (World::Get().GetTransport().IsOnline() && (aEvent.Drop || aEvent.DropSeq != 0 || aEvent.GroundRefHandle != 0))
+            spdlog::warn(
+                "[DropSync] event not queued: actor={:X} has no ownership token (base={:X} count={} drop={} seq={} groundHandle={:X})", apActor->formID, aEvent.Item.BaseId.BaseId,
+                aEvent.Item.Count, aEvent.Drop, aEvent.DropSeq, aEvent.GroundRefHandle);
+        return false;
+    }
 
     aEvent.ServerId = ownershipToken->ServerId;
     aEvent.OwnershipEpoch = ownershipToken->OwnershipEpoch;
     World::Get().GetRunner().Trigger(std::move(aEvent));
+    return true;
+}
+
+// The game returns the handle of the reference it created through a hidden return argument
+uint32_t HandleFromDropResult(void* apReturned, void* apResult) noexcept
+{
+    const void* pHandle = apReturned ? apReturned : apResult;
+    return pHandle ? static_cast<const BSPointerHandle<TESObjectREFR>*>(pHandle)->handle.iBits : 0;
+}
+
+// Sequence number that ties the inventory change of a drop to the reference the game creates for it
+std::atomic<uint32_t> s_dropSequence{0};
+
+// Actor::GetEyeVector(NiPoint3& aOrigin, NiPoint3& aDirection, bool aIncludeCameraOffset), vtable slot 0xC2 in the same
+// numbering where sub_CB is the DropObject hooked in this file. For the player, the game places a drop without an
+// explicit location in front of this origin, which it reads from the first person camera node (see DropSync.h).
+TP_THIS_FUNCTION(TGetEyeVector, void, Actor, NiPoint3&, NiPoint3&, bool);
+constexpr size_t kActorGetEyeVectorSlot = 0xC2;
+
+bool GetEyeVector(Actor* apActor, NiPoint3& aOrigin, NiPoint3& aDirection) noexcept
+{
+    auto** ppVirtualTable = *reinterpret_cast<TGetEyeVector***>(apActor);
+    TGetEyeVector* pGetEyeVector = ppVirtualTable ? ppVirtualTable[kActorGetEyeVectorSlot] : nullptr;
+    if (!pGetEyeVector)
+        return false;
+
+    // Read only getter: it fills the two points the placement helper uses and touches nothing else
+    TiltedPhoques::ThisCall(pGetEyeVector, apActor, aOrigin, aDirection, true);
+    return true;
 }
 }
+
+#if TP_DROPSYNC_DIAG
+namespace
+{
+// Diagnostics for the place the game picks for a dropped reference. Everything here only reads state.
+//
+// For the player the game does not measure the drop from TESObjectREFR::position: it asks for the eye vector
+// (Actor vtable slot 0xC2, in the same numbering where sub_CB is the DropObject hooked below) and creates the
+// reference at origin + direction * distance, rotating the direction and retrying when the spot is not free.
+// The origin of that eye vector is the world translation of the first person camera node hanging from
+// PlayerCamera, never the actor. Every other actor keeps a fixed offset from its own position instead, which is
+// what the replicated drops in the logs already show.
+
+// Environment of a drop: none of these reads needs an offset the repository does not already map.
+void LogDropEnvironment(Actor* apActor, uint32_t aDropSeq, bool aQueued) noexcept
+{
+    auto* pWindow = BSGraphics::GetMainWindow(); // null until the renderer is up
+    auto* pUI = UI::Get();
+    auto* pPlayerCamera = PlayerCamera::Get();
+
+    spdlog::info(
+        "[DropSync] drop.env seq={} actor={:X} isPlayer={} queued={} focus={} firstPerson={} invMenu={} contMenu={} favMenu={} sitting={} weaponDrawn={} "
+        "actorPos=({:.1f},{:.1f},{:.1f}) actorRot=({:.4f},{:.4f},{:.4f})",
+        aDropSeq, apActor->formID, apActor == static_cast<Actor*>(PlayerCharacter::Get()), aQueued,
+        pWindow != nullptr && pWindow->IsForeground(), pPlayerCamera != nullptr && pPlayerCamera->IsFirstPerson(),
+        pUI != nullptr && pUI->GetMenuOpen(BSFixedString("InventoryMenu")), pUI != nullptr && pUI->GetMenuOpen(BSFixedString("ContainerMenu")),
+        pUI != nullptr && pUI->GetMenuOpen(BSFixedString("FavoritesMenu")), apActor->actorState.IsSittingOrSleeping(), apActor->actorState.IsWeaponDrawn(),
+        apActor->position.x, apActor->position.y, apActor->position.z, apActor->rotation.x, apActor->rotation.y, apActor->rotation.z);
+}
+
+// Where the reference ended up, measured against both candidate bases at once
+void LogDropPlacement(uint32_t aDropSeq, TESObjectREFR* apDropped, const NiPoint3& acActorPos, const NiPoint3& acEyeOrigin, bool aHaveEye) noexcept
+{
+    const glm::vec3 cFromActor = apDropped->position - acActorPos;
+    const glm::vec3 cFromEye = apDropped->position - acEyeOrigin;
+
+    spdlog::info(
+        "[DropSync] drop.offset seq={} fromActor=({:.1f},{:.1f},{:.1f}) |xy|={:.1f} |xyz|={:.1f} haveEye={} fromEye=({:.1f},{:.1f},{:.1f}) |eyeXY|={:.1f} |eyeXYZ|={:.1f}",
+        aDropSeq, cFromActor.x, cFromActor.y, cFromActor.z, glm::length(glm::vec2(cFromActor)), glm::length(cFromActor), aHaveEye, aHaveEye ? cFromEye.x : 0.0f,
+        aHaveEye ? cFromEye.y : 0.0f, aHaveEye ? cFromEye.z : 0.0f, aHaveEye ? glm::length(glm::vec2(cFromEye)) : 0.0f, aHaveEye ? glm::length(cFromEye) : 0.0f);
+}
+} // namespace
+#endif
+
+#if TP_DROPSYNC_DIAG && TP_DROPSYNC_DIAG_BASE
+namespace
+{
+// NiAVObject keeps its transforms inside the opaque pad of NetImmerse/NiAVObject.h, whose total size the header
+// already pins down with a static_assert:
+//   0x48 NiTransform local (NiMatrix3 rotate of 0x24, then the translation, then the scale)
+//   0x7C NiTransform world
+// No new VersionDb id is involved, only byte offsets inside an object of a size that is already verified. A wrong
+// offset shows up in the first healthy drop, because nodeVsPos is then not close to zero.
+constexpr size_t kNiAVObjectLocalTranslate = 0x48 + 0x24;
+constexpr size_t kNiAVObjectWorldTranslate = 0x7C + 0x24;
+static_assert(kNiAVObjectWorldTranslate + sizeof(NiPoint3) <= sizeof(NiAVObject), "NiAVObject transforms fall outside the mapped object");
+
+// PlayerCamera::cameraStates[], whose first entry is the first person state, and the camera node that state owns.
+// fpStateIsCurrent cross-checks the first offset against the current state the repository does map.
+constexpr size_t kPlayerCameraStates = 0xB8;
+constexpr size_t kFirstPersonStateCameraObj = 0x58;
+
+bool LooksLikeObject(const void* apPointer) noexcept
+{
+    const auto cAddress = reinterpret_cast<uintptr_t>(apPointer);
+    return cAddress >= 0x10000 && (cAddress & 7) == 0;
+}
+
+const void* ReadPointer(const void* apObject, size_t aOffset) noexcept
+{
+    if (!LooksLikeObject(apObject))
+        return nullptr;
+
+    const void* pValue = *reinterpret_cast<void* const*>(static_cast<const uint8_t*>(apObject) + aOffset);
+    return LooksLikeObject(pValue) ? pValue : nullptr;
+}
+
+NiPoint3 ReadTranslate(const void* apObject, size_t aOffset) noexcept
+{
+    if (!LooksLikeObject(apObject))
+        return NiPoint3{};
+
+    const auto* pFloats = reinterpret_cast<const float*>(static_cast<const uint8_t*>(apObject) + aOffset);
+    return NiPoint3(glm::vec3(pFloats[0], pFloats[1], pFloats[2]));
+}
+
+// Logs the base the game is about to place the reference on, next to the eye vector the hook already read
+void LogDropBase(Actor* apActor, uint32_t aDropSeq, const NiPoint3& acEyeOrigin, const NiPoint3& acEyeDirection, bool aHaveEye) noexcept
+{
+    const bool cIsPlayerSingleton = apActor == static_cast<Actor*>(PlayerCharacter::Get());
+
+    // PlayerCamera redeclares the TESCamera members, so its own pos/cameraNode/state shadow the real ones at the
+    // wrong offsets. Read them through the base class, the way TESCamera::GetNiCamera() does.
+    TESCamera* pCamera = PlayerCamera::Get();
+
+    const NiPoint3 cCameraPos = pCamera ? pCamera->pos : NiPoint3{};
+    const void* pCameraNode = pCamera ? pCamera->cameraNode : nullptr;
+    const void* pCameraState = pCamera ? pCamera->state : nullptr;
+
+    NiNode* pActorNode = apActor->GetNiNode();
+    const NiPoint3 cNodeWorld = ReadTranslate(pActorNode, kNiAVObjectWorldTranslate);
+    const NiPoint3 cNodeLocal = ReadTranslate(pActorNode, kNiAVObjectLocalTranslate);
+
+    const void* pFirstPersonState = cIsPlayerSingleton ? ReadPointer(pCamera, kPlayerCameraStates) : nullptr;
+    const void* pFirstPersonNode = ReadPointer(pFirstPersonState, kFirstPersonStateCameraObj);
+    const NiPoint3 cEyeNodeWorld = ReadTranslate(pFirstPersonNode, kNiAVObjectWorldTranslate);
+    const NiPoint3 cEyeNodeLocal = ReadTranslate(pFirstPersonNode, kNiAVObjectLocalTranslate);
+
+    spdlog::info(
+        "[DropSync] drop.base seq={} node={:X} nodeWorld=({:.1f},{:.1f},{:.1f}) nodeLocal=({:.1f},{:.1f},{:.1f}) nodeVsPos={:.1f} camPos=({:.1f},{:.1f},{:.1f}) camNode={:X} "
+        "camState={:X} fpState={:X} fpStateIsCurrent={} fpNode={:X} fpWorld=({:.1f},{:.1f},{:.1f}) fpLocal=({:.1f},{:.1f},{:.1f}) fpWorldVsLocal={:.1f} fpWorldVsPos={:.1f}",
+        aDropSeq, reinterpret_cast<uintptr_t>(pActorNode), cNodeWorld.x, cNodeWorld.y, cNodeWorld.z, cNodeLocal.x, cNodeLocal.y, cNodeLocal.z,
+        glm::distance(glm::vec3(cNodeWorld), glm::vec3(apActor->position)), cCameraPos.x, cCameraPos.y, cCameraPos.z, reinterpret_cast<uintptr_t>(pCameraNode),
+        reinterpret_cast<uintptr_t>(pCameraState), reinterpret_cast<uintptr_t>(pFirstPersonState), pFirstPersonState != nullptr && pFirstPersonState == pCameraState,
+        reinterpret_cast<uintptr_t>(pFirstPersonNode), cEyeNodeWorld.x, cEyeNodeWorld.y, cEyeNodeWorld.z, cEyeNodeLocal.x, cEyeNodeLocal.y, cEyeNodeLocal.z,
+        glm::distance(glm::vec3(cEyeNodeWorld), glm::vec3(cEyeNodeLocal)), glm::distance(glm::vec3(cEyeNodeWorld), glm::vec3(apActor->position)));
+
+    if (!aHaveEye)
+        return;
+
+    spdlog::info(
+        "[DropSync] drop.eye seq={} origin=({:.1f},{:.1f},{:.1f}) dir=({:.4f},{:.4f},{:.4f}) originVsActor={:.1f} originVsFpWorld={:.1f} originVsNodeWorld={:.1f}", aDropSeq,
+        acEyeOrigin.x, acEyeOrigin.y, acEyeOrigin.z, acEyeDirection.x, acEyeDirection.y, acEyeDirection.z,
+        glm::distance(glm::vec3(acEyeOrigin), glm::vec3(apActor->position)), glm::distance(glm::vec3(acEyeOrigin), glm::vec3(cEyeNodeWorld)),
+        glm::distance(glm::vec3(acEyeOrigin), glm::vec3(cNodeWorld)));
+}
+} // namespace
+#endif
 
 #ifdef SAVE_STUFF
 
@@ -1112,7 +1288,24 @@ void* TP_MAKE_THISCALL(HookPickUpObject, Actor, TESObjectREFR* apObject, int32_t
         // The inventory change event should always be sent to the server, otherwise the server inventory won't be updated.
         bool shouldUpdateClients = apObject->IsTemporary() && !ScopedActivateOverride::IsOverriden();
 
-        QueueActorInventoryChange(apThis, InventoryChangeEvent(apThis->formID, std::move(item), false, shouldUpdateClients));
+        InventoryChangeEvent event(apThis->formID, std::move(item), false, shouldUpdateClients);
+
+        // Original references can also be tracked drops. The service decides which network path owns this pickup.
+        if (!ScopedActivateOverride::IsOverriden())
+        {
+            event.GroundRefHandle = apObject->GetHandle().handle.iBits;
+            event.GroundRefFormId = apObject->formID;
+            event.GroundRefBaseId = apObject->baseForm->formID;
+
+#if TP_DROPSYNC_DIAG
+            spdlog::info(
+                "[DropSync] pickup.begin hook=Actor actor={:X} ref={:X} handle={:X} base={:X} aCount={} entryCount={} flags={:X} pos=({:.1f},{:.1f},{:.1f}) cell={:X}", apThis->formID,
+                apObject->formID, event.GroundRefHandle, event.GroundRefBaseId, aCount, event.Item.Count, apObject->flags, apObject->position.x, apObject->position.y,
+                apObject->position.z, apObject->parentCell ? apObject->parentCell->formID : 0);
+#endif
+        }
+
+        QueueActorInventoryChange(apThis, std::move(event));
     }
 
     return TiltedPhoques::ThisCall(RealPickUpObject, apThis, apObject, aCount, aUnk1, aUnk2);
@@ -1129,22 +1322,130 @@ void* TP_MAKE_THISCALL(HookDropObject, Actor, void* apResult, TESBoundObject* ap
 
     Inventory::Entry item{};
     modSystem.GetServerModId(apObject->formID, item.BaseId);
-    item.Count = -aCount;
 
     if (apExtraData)
         apThis->GetItemFromExtraData(item, apExtraData);
 
-    QueueActorInventoryChange(apThis, InventoryChangeEvent(apThis->formID, std::move(item), true));
+    // The extra data of a stack carries its own count, which must not replace the (negative) dropped amount
+    if (apExtraData && item.Count != 0 && item.Count != aCount)
+        spdlog::warn("[DropSync] drop count taken from the call, not from ExtraCount: base={:X} aCount={} extraCount={}", apObject->formID, aCount, item.Count);
+    item.Count = -aCount;
 
-    ScopedInventoryOverride _;
+    const uint32_t cDropSeq = ++s_dropSequence;
 
-    return TiltedPhoques::ThisCall(RealDropObject, apThis, apResult, apObject, apExtraData, aCount, apLocation, apRotation);
+    InventoryChangeEvent event(apThis->formID, std::move(item), true);
+    event.DropSeq = cDropSeq;
+
+    const bool cQueued = QueueActorInventoryChange(apThis, std::move(event));
+
+#if TP_DROPSYNC_DIAG
+    if (cQueued)
+        spdlog::info(
+            "[DropSync] drop.begin seq={} actor={:X} base={:X} aCount={} hasExtra={} hasLocation={} actorPos=({:.1f},{:.1f},{:.1f})", cDropSeq, apThis->formID, apObject->formID, aCount,
+            apExtraData != nullptr, apLocation != nullptr, apThis->position.x, apThis->position.y, apThis->position.z);
+#endif
+
+    // The game places a drop of the player without a location in front of its eye origin, never measured from the
+    // actor. When the first person camera node loses its parent transform, that origin is reported at the cell origin
+    // and the item is created hundreds of units away, out of sight (ls3, 17/09). Give such a drop the placement the
+    // game uses for any other actor instead.
+    const bool cIsPlayer = apThis == static_cast<Actor*>(PlayerCharacter::Get());
+    NiPoint3 eyeOrigin{};
+    NiPoint3 eyeDirection{};
+    const bool cHaveEye = cIsPlayer && GetEyeVector(apThis, eyeOrigin, eyeDirection);
+
+    NiPoint3 fallbackLocation{};
+    NiPoint3* pLocation = apLocation;
+    if (!apLocation && cHaveEye && !DropSync::IsEyeOriginUsable(eyeOrigin, apThis->position))
+    {
+        fallbackLocation = NiPoint3(DropSync::ActorDropLocation(apThis->position, apThis->rotation.z));
+        pLocation = &fallbackLocation;
+
+        spdlog::warn(
+            "[DropSync] eye origin unusable, drop placed in front of the player instead: seq={} base={:X} eyeOrigin=({:.1f},{:.1f},{:.1f}) actorPos=({:.1f},{:.1f},{:.1f}) "
+            "location=({:.1f},{:.1f},{:.1f})",
+            cDropSeq, apObject->formID, eyeOrigin.x, eyeOrigin.y, eyeOrigin.z, apThis->position.x, apThis->position.y, apThis->position.z, fallbackLocation.x,
+            fallbackLocation.y, fallbackLocation.z);
+    }
+
+#if TP_DROPSYNC_DIAG
+    // Placement diagnostics. They do not depend on cQueued, because one of the controls is a single client that
+    // never connects and queues nothing; drops of other actors stay out of the log unless they are replicated.
+    const bool cTracePlacement = cQueued || cIsPlayer;
+    const NiPoint3 cActorPosAtDrop = apThis->position;
+
+    if (cTracePlacement)
+    {
+        LogDropEnvironment(apThis, cDropSeq, cQueued);
+#if TP_DROPSYNC_DIAG_BASE
+        LogDropBase(apThis, cDropSeq, eyeOrigin, eyeDirection, cHaveEye);
+#endif
+    }
+#endif
+
+    void* pReturned = nullptr;
+    {
+        ScopedInventoryOverride _;
+        pReturned = TiltedPhoques::ThisCall(RealDropObject, apThis, apResult, apObject, apExtraData, aCount, pLocation, apRotation);
+    }
+
+    // Only drops that went to the server are tracked; everything else behaves as before
+    if (cQueued)
+    {
+        DroppedItemEvent dropped{};
+        dropped.DropSeq = cDropSeq;
+        dropped.HandleBits = HandleFromDropResult(pReturned, apResult);
+        dropped.BaseFormId = apObject->formID;
+        dropped.ActorFormId = apThis->formID;
+        dropped.Count = aCount;
+        dropped.Queued = cQueued;
+
+        if (TESObjectREFR* pDropped = dropped.HandleBits ? TESObjectREFR::GetByHandle(dropped.HandleBits) : nullptr)
+        {
+            dropped.RefFormId = pDropped->formID;
+            dropped.PositionX = pDropped->position.x;
+            dropped.PositionY = pDropped->position.y;
+            dropped.PositionZ = pDropped->position.z;
+
+#if TP_DROPSYNC_DIAG
+            spdlog::info(
+                "[DropSync] drop.created seq={} handle={:X} ref={:X} flags={:X} loaded={} pos=({:.1f},{:.1f},{:.1f}) cell={:X} returnedIsArg={}", cDropSeq, dropped.HandleBits,
+                pDropped->formID, pDropped->flags, pDropped->loadedState != nullptr, pDropped->position.x, pDropped->position.y, pDropped->position.z,
+                pDropped->parentCell ? pDropped->parentCell->formID : 0, pReturned == apResult);
+
+            LogDropPlacement(cDropSeq, pDropped, cActorPosAtDrop, eyeOrigin, cHaveEye);
+#endif
+        }
+        else
+            spdlog::warn("[DropSync] drop.created NO REF: seq={} handle={:X} actor={:X} base={:X} aCount={}", cDropSeq, dropped.HandleBits, apThis->formID, apObject->formID, aCount);
+
+        World::Get().GetRunner().Trigger(std::move(dropped));
+    }
+
+#if TP_DROPSYNC_DIAG
+    // Same measurement for the single client control, where the drop never reaches a server
+    if (!cQueued && cTracePlacement)
+    {
+        const uint32_t cHandleBits = HandleFromDropResult(pReturned, apResult);
+
+        // GetByHandle releases the reference its lookup takes, so the handle count is left untouched
+        if (TESObjectREFR* pDropped = cHandleBits ? TESObjectREFR::GetByHandle(cHandleBits) : nullptr)
+        {
+            spdlog::info(
+                "[DropSync] drop.created seq={} handle={:X} ref={:X} flags={:X} loaded={} pos=({:.1f},{:.1f},{:.1f}) cell={:X} returnedIsArg={} queued=false", cDropSeq, cHandleBits,
+                pDropped->formID, pDropped->flags, pDropped->loadedState != nullptr, pDropped->position.x, pDropped->position.y, pDropped->position.z,
+                pDropped->parentCell ? pDropped->parentCell->formID : 0, pReturned == apResult);
+
+            LogDropPlacement(cDropSeq, pDropped, cActorPosAtDrop, eyeOrigin, cHaveEye);
+        }
+    }
+#endif
+
+    return pReturned;
 }
 
-void Actor::DropOrPickUpObject(const Inventory::Entry& arEntry, NiPoint3* apLocation, NiPoint3* apRotation) noexcept
+uint32_t Actor::DropOrPickUpObject(const Inventory::Entry& arEntry, NiPoint3* apLocation, NiPoint3* apRotation) noexcept
 {
-    ExtraDataList* pExtraData = GetExtraDataFromItem(arEntry);
-
     ModSystem& modSystem = World::Get().GetModSystem();
 
     uint32_t objectId = modSystem.GetGameId(arEntry.BaseId);
@@ -1152,19 +1453,35 @@ void Actor::DropOrPickUpObject(const Inventory::Entry& arEntry, NiPoint3* apLoca
     if (!pObject)
     {
         spdlog::warn("Object to drop not found, {:X}:{:X}.", arEntry.BaseId.ModId, arEntry.BaseId.BaseId);
-        return;
+        return 0;
     }
 
-    if (arEntry.Count < 0)
-        DropObject(pObject, pExtraData, -arEntry.Count, apLocation, apRotation);
-    // TODO: pick up
+    // Pickups of dropped items do not come through here: they arrive as a plain inventory change that names the
+    // drop id, and InventoryService removes this client's copy of the ground reference.
+    if (arEntry.Count >= 0)
+    {
+        spdlog::warn("[DropSync] DropOrPickUpObject ignored a non-drop entry: base={:X} count={}", objectId, arEntry.Count);
+        return 0;
+    }
+
+    ExtraDataList* pExtraData = GetExtraDataFromItem(arEntry);
+    return DropObject(pObject, pExtraData, -arEntry.Count, apLocation, apRotation);
 }
 
-void Actor::DropObject(TESBoundObject* apObject, ExtraDataList* apExtraData, int32_t aCount, NiPoint3* apLocation, NiPoint3* apRotation) noexcept
+uint32_t Actor::DropObject(TESBoundObject* apObject, ExtraDataList* apExtraData, int32_t aCount, NiPoint3* apLocation, NiPoint3* apRotation) noexcept
 {
-    spdlog::debug("Dropping object, form id: {:X}, count: {}, actor: {:X}", apObject->formID, aCount, formID);
     BSPointerHandle<TESObjectREFR> result{};
-    TiltedPhoques::ThisCall(RealDropObject, this, &result, apObject, apExtraData, aCount, apLocation, apRotation);
+
+    // RealDropObject is the player's override of DropObject. Besides RemoveItem it keeps the player's own drops in
+    // fields that only PlayerCharacter has, and writes them when the new reference has no 3D yet: on any other actor
+    // that lands past the end of the object. RemoveItem with the dropping reason is the part both overrides share.
+    if (this == static_cast<Actor*>(PlayerCharacter::Get()))
+        TiltedPhoques::ThisCall(RealDropObject, this, &result, apObject, apExtraData, aCount, apLocation, apRotation);
+    else
+        result = RemoveItem(apObject, aCount, ITEM_REMOVE_REASON::kDropping, apExtraData, nullptr, apLocation, apRotation);
+
+    spdlog::info("Dropping object, form id: {:X}, count: {}, actor: {:X}, result handle: {:X}", apObject->formID, aCount, formID, result.handle.iBits);
+    return result.handle.iBits;
 }
 
 TP_THIS_FUNCTION(TUpdateDetectionState, void, ActorKnowledge, void*);

@@ -7,6 +7,7 @@
 #include <Services/PapyrusService.h>
 #include <Events/ActivateEvent.h>
 #include <Events/InventoryChangeEvent.h>
+#include <DropSync.h>
 #include <Events/ScriptAnimationEvent.h>
 #include <Events/LockChangeEvent.h>
 
@@ -1029,11 +1030,25 @@ bool TP_MAKE_THISCALL(HookPlayAnimation, void, uint32_t auiStackID, TESObjectREF
 
 bool TP_MAKE_THISCALL(HookActivate, TESObjectREFR, TESObjectREFR* apActivator, uint8_t aUnk1, TESBoundObject* apObjectToGet, int32_t aCount, char aDefaultProcessing)
 {
+    // A native pickup replay must not enqueue another activation to send back to the server.
+    if (ScopedActivateOverride::IsOverriden() && ScopedInventoryOverride::IsOverriden())
+        return TiltedPhoques::ThisCall(RealActivate, apThis, apActivator, aUnk1, apObjectToGet, aCount, aDefaultProcessing);
+
     Actor* pActivator = Cast<Actor>(apActivator);
 
     // Exclude books from activation since only reading them removes them from the cell
     // Note: Books are now unsynced 
-    if (pActivator && apThis->baseForm->formType != FormType::Book)
+    if (pActivator && apThis->IsTemporary() && apThis->formType != Actor::Type)
+    {
+        // A temporary item reference (typically a dropped item) has no id the other clients could resolve, and the
+        // game consumes it before the queued event is handled. Picking it up is synced through the inventory change.
+#if TP_DROPSYNC_DIAG
+        spdlog::info(
+            "[DropSync] activate.temp ref={:X} base={:X} by={:X}: ActivateEvent not queued (temporary reference has no shared id)", apThis->formID, apThis->baseForm->formID,
+            pActivator->formID);
+#endif
+    }
+    else if (pActivator && apThis->baseForm->formType != FormType::Book)
     {
         auto openState = TESObjectREFR::kNone;
         if (apThis->baseForm->formType == FormType::Door)
